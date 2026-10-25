@@ -1,0 +1,13 @@
+name = "tomori-ai-command"
+compatibility_date = "2026-10-01"
+pages_build_output_dir = "dist"
+
+# Cloudflare D1 Database binding
+[[d1_databases]]
+binding = "DB"
+database_name = "tomori-ai-command-db"
+database_id = "tomori-ai-command-d1-id"
+
+[vars]
+ENVIRONMENT = "production"
+# API_SECRET_KEY は Cloudflare Dashboard または `wrangler secret put API_SECRET_KEY` で暗号化登録
