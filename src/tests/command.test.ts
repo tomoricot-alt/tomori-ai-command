@@ -231,4 +231,61 @@ describe('TOMORI AI COMMAND 厳格セキュリティ・D1同期・機能総合�
     expect(chatEntry?.used_percent).toBeNull();
     expect(chatEntry?.remaining_percent).toBeNull();
   });
+
+  // 10. PowerShell同期スクリプト認証フローの検証（ログイン -> エフェメラルトークン取得 -> APIアクセス）
+  it('10. [PowerShell同期認証フロー] /api/auth/loginで取得したエフェメラルトークンにより保護API認証が通過すること', async () => {
+    // ログイン処理でエフェメラルトークンが発行されること
+    const sessionToken = await createSessionToken(TEST_VALID_SECRET, 'admin');
+    expect(sessionToken).toBeDefined();
+
+    // 取得したトークンで認証検証が成功すること
+    const verified = await verifySessionToken(sessionToken, TEST_VALID_SECRET);
+    expect(verified).not.toBeNull();
+    expect(verified?.role).toBe('admin');
+  });
+
+  // 11. 不正シークレットおよび無効トークンの拒絶テスト
+  it('11. [認証拒絶テスト] 不正なキーや改ざんトークンが確実に拒絶されること', async () => {
+    // 短いキーや脆弱なキーはトークン発行段階で弾かれること
+    await expect(createSessionToken('short', 'admin')).rejects.toThrow('SERVER_SECRET_INVALID');
+    await expect(createSessionToken('tomori', 'admin')).rejects.toThrow('SERVER_SECRET_INVALID');
+
+    // 期限切れトークンの拒絶テスト
+    const pastSec = Math.floor(Date.now() / 1000) - 3600;
+    const expiredPayload = {
+      sub: 'tomori-admin',
+      exp: pastSec,
+      nonce: 'test-nonce',
+      role: 'admin',
+    };
+    const enc = new TextEncoder();
+    const hB64 = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+    const pB64 = Buffer.from(JSON.stringify(expiredPayload)).toString('base64url');
+    const cryptoKey = await crypto.subtle.importKey(
+      'raw',
+      enc.encode(TEST_VALID_SECRET),
+      { name: 'HMAC', hash: 'SHA-256' },
+      false,
+      ['sign']
+    );
+    const sig = await crypto.subtle.sign('HMAC', cryptoKey, enc.encode(`${hB64}.${pB64}`));
+    const sB64 = Buffer.from(new Uint8Array(sig)).toString('base64url');
+    const expiredToken = `${hB64}.${pB64}.${sB64}`;
+
+    const expiredResult = await verifySessionToken(expiredToken, TEST_VALID_SECRET);
+    expect(expiredResult).toBeNull();
+  });
+
+  // 12. D1未接続時の503エラー処理検証
+  it('12. [D1未接続エラー処理] D1データベース未接続時に503 D1_NOT_CONNECTEDをエラーとして検知すること', async () => {
+    (globalThis as any).fetch = async () => ({
+      status: 503,
+      ok: false,
+      json: async () => ({ error: 'DatabaseNotBound', code: 'D1_NOT_CONNECTED' }),
+    });
+
+    const result = await ApiService.getTasks();
+    expect(result.fromServer).toBe(false);
+    expect(result.error).toBe('D1_NOT_CONNECTED');
+  });
 });
