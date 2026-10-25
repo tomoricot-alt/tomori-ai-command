@@ -24,11 +24,11 @@ export const TaskCreateModal: React.FC = () => {
   );
   const [assignedAI, setAssignedAI] = useState<AIServiceId>('codex');
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!title.trim()) return;
 
-    const newTask = createTask({
+    const newTask = await createTask({
       title,
       description,
       project,

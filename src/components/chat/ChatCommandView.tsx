@@ -82,10 +82,10 @@ export const ChatCommandView: React.FC = () => {
   };
 
   // タスクへ登録して完了
-  const handleRegisterTask = () => {
+  const handleRegisterTask = async () => {
     if (!taskTitle || !generatedPrompt) return;
 
-    const newTask = createTask({
+    const newTask = await createTask({
       title: taskTitle,
       description: inputPrompt,
       project: selectedProject,

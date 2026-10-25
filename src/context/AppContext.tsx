@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
+import { ApiService, SyncStatus } from '../services/api';
 import { PromptGeneratorService } from '../services/promptGenerator';
 import { AppSettings, StorageService } from '../services/storage';
 import { ActiveView, AIServiceId, AIUsageData, ProjectInfo, Task, TaskStatus } from '../types';
@@ -15,11 +16,13 @@ interface AppContextType {
   aiUsage: AIUsageData;
   settings: AppSettings;
   activeView: ActiveView;
-  selectedProject: string; // 'all' or project name
+  selectedProject: string;
   selectedTask: Task | null;
   isCreateModalOpen: boolean;
   isDetailModalOpen: boolean;
   isAuthenticated: boolean;
+  syncStatus: SyncStatus;
+  isSampleMode: boolean;
   toasts: Toast[];
   staleTasksCount: number;
 
@@ -29,9 +32,12 @@ interface AppContextType {
   setSelectedTask: (task: Task | null) => void;
   setIsCreateModalOpen: (open: boolean) => void;
   setIsDetailModalOpen: (open: boolean) => void;
-  login: (pin: string) => boolean;
+  loginWithKey: (key: string) => Promise<boolean>;
   logout: () => void;
   showToast: (message: string, type?: 'success' | 'info' | 'warning' | 'error') => void;
+  syncWithServer: () => Promise<void>;
+  enableSampleMode: () => void;
+  clearToProductionMode: () => void;
 
   createTask: (params: {
     title: string;
@@ -41,13 +47,13 @@ interface AppContextType {
     modelName?: string;
     sourceUrl?: string;
     instructionPrompt?: string;
-  }) => Task;
-  updateTask: (task: Task) => void;
-  updateTaskStatus: (taskId: string, status: TaskStatus, confirmed?: boolean) => void;
-  deleteTask: (taskId: string) => void;
+  }) => Promise<Task>;
+  updateTask: (task: Task) => Promise<void>;
+  updateTaskStatus: (taskId: string, status: TaskStatus, confirmed?: boolean) => Promise<void>;
+  deleteTask: (taskId: string) => Promise<void>;
   copyPromptToClipboard: (text: string) => Promise<boolean>;
   updateSettings: (newSettings: Partial<AppSettings>) => void;
-  refreshUsage: () => void;
+  refreshUsage: () => Promise<void>;
   exportData: () => void;
   importData: (json: string) => boolean;
   isTaskStale: (task: Task) => boolean;
@@ -65,10 +71,109 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [isDetailModalOpen, setIsDetailModalOpen] = useState(false);
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => StorageService.isAuthenticated());
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => Boolean(ApiService.getToken()));
+  const [isSampleMode, setIsSampleMode] = useState<boolean>(() => StorageService.isSampleMode());
   const [toasts, setToasts] = useState<Toast[]>([]);
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>({
+    online: navigator.onLine,
+    synced: true,
+    authError: false,
+    lastSyncedAt: new Date().toLocaleTimeString('ja-JP'),
+  });
 
-  // 変更時に保存
+  // トースト表示
+  const showToast = (message: string, type: 'success' | 'info' | 'warning' | 'error' = 'info') => {
+    const id = Math.random().toString(36).substring(2, 9);
+    setToasts((prev) => [...prev, { id, message, type }]);
+    setTimeout(() => {
+      setToasts((prev) => prev.filter((t) => t.id !== id));
+    }, 3500);
+  };
+
+  // サーバーとD1データ同期
+  const syncWithServer = async () => {
+    if (isSampleMode) return;
+
+    setSyncStatus((prev) => ({ ...prev, synced: false }));
+    try {
+      const res = await ApiService.getTasks();
+      if (res.fromServer) {
+        setTasks(res.tasks);
+        StorageService.saveTasks(res.tasks);
+        setSyncStatus({
+          online: true,
+          synced: true,
+          authError: false,
+          lastSyncedAt: new Date().toLocaleTimeString('ja-JP'),
+          message: 'D1データベースと同期完了',
+        });
+      } else {
+        setSyncStatus((prev) => ({
+          ...prev,
+          online: false,
+          synced: true,
+          message: 'ローカルキャッシュで動作中',
+        }));
+      }
+
+      // AI利用枠データも同期
+      const usageData = await ApiService.getUsage();
+      if (usageData && usageData.entries.length > 0) {
+        setAiUsage(usageData);
+        StorageService.saveAIUsage(usageData);
+      }
+    } catch (e: any) {
+      if (e.message === 'AUTH_REQUIRED') {
+        setIsAuthenticated(false);
+        setSyncStatus((prev) => ({
+          ...prev,
+          authError: true,
+          synced: false,
+          message: '認証が必要です（401）',
+        }));
+      } else {
+        setSyncStatus((prev) => ({
+          ...prev,
+          online: false,
+          synced: false,
+          message: '同期失敗・オフラインキャッシュ使用',
+        }));
+      }
+    }
+  };
+
+  // 起動時の認証と同期確認
+  useEffect(() => {
+    const init = async () => {
+      const auth = await ApiService.checkAuth();
+      if (auth.authenticated) {
+        setIsAuthenticated(true);
+        await syncWithServer();
+      } else {
+        if (!isSampleMode && !ApiService.getToken()) {
+          setIsAuthenticated(false);
+        }
+      }
+    };
+    init();
+
+    const handleOnline = () => {
+      setSyncStatus((prev) => ({ ...prev, online: true }));
+      syncWithServer();
+    };
+    const handleOffline = () => {
+      setSyncStatus((prev) => ({ ...prev, online: false }));
+    };
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
+  // ローカル保存
   useEffect(() => {
     StorageService.saveTasks(tasks);
   }, [tasks]);
@@ -85,41 +190,49 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     StorageService.saveSettings(settings);
   }, [settings]);
 
-  const showToast = (message: string, type: 'success' | 'info' | 'warning' | 'error' = 'info') => {
-    const id = Math.random().toString(36).substring(2, 9);
-    setToasts((prev) => [...prev, { id, message, type }]);
-    setTimeout(() => {
-      setToasts((prev) => prev.filter((t) => t.id !== id));
-    }, 3500);
-  };
-
-  const login = (pin: string): boolean => {
-    // 開発用デフォルトPIN: 2026 または tomori
-    if (pin === '2026' || pin === 'tomori' || pin === 'admin') {
-      StorageService.setAuthenticated(true);
+  // サーバー側APIログイン
+  const loginWithKey = async (key: string): Promise<boolean> => {
+    const success = await ApiService.login(key);
+    if (success) {
       setIsAuthenticated(true);
-      showToast('認証に成功しました', 'success');
+      setSyncStatus((prev) => ({ ...prev, authError: false }));
+      showToast('認証に成功しました。D1同期を開始します。', 'success');
+      await syncWithServer();
       return true;
     }
-    showToast('認証コードが正しくありません', 'error');
+    showToast('アクセスキーが無効です。', 'error');
     return false;
   };
 
   const logout = () => {
-    StorageService.setAuthenticated(false);
+    ApiService.clearToken();
     setIsAuthenticated(false);
-    showToast('ログアウトしました', 'info');
+    showToast('ログアウトしました。', 'info');
+  };
+
+  // サンプルモード切り替え
+  const enableSampleMode = () => {
+    const data = StorageService.loadSampleData();
+    setTasks(data.tasks);
+    setAiUsage(data.usage);
+    setIsSampleMode(true);
+    setIsAuthenticated(true);
+    showToast('サンプル/デモモードに切り替えました。', 'info');
+  };
+
+  const clearToProductionMode = () => {
+    StorageService.clearLocalCache();
+    setTasks([]);
+    setIsSampleMode(false);
+    showToast('本番モードに切り替えました。D1からデータを再取得します。', 'info');
+    syncWithServer();
   };
 
   const isTaskStale = (task: Task): boolean => {
     if (task.status === '完了' || task.status === '保留') return false;
-    // updated_at または lastConfirmedAt を基準に判定
-    // 簡易パース
     try {
-      // 2時間以上の経過または「3時間前」等の記載
       if (task.lastConfirmedAt.includes('時間前')) return true;
       if (task.updatedAt) {
-        // "2026-10-25 17:30 JST" 形式の簡易パース
         const match = task.updatedAt.match(/(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})/);
         if (match) {
           const taskDate = new Date(`${match[1]}-${match[2]}-${match[3]}T${match[4]}:${match[5]}:00+09:00`);
@@ -136,7 +249,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const staleTasksCount = tasks.filter(isTaskStale).length;
 
-  const createTask = (params: {
+  const createTask = async (params: {
     title: string;
     description: string;
     project: string;
@@ -144,7 +257,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     modelName?: string;
     sourceUrl?: string;
     instructionPrompt?: string;
-  }): Task => {
+  }): Promise<Task> => {
     const newId = `TSK-${1000 + tasks.length + 1}`;
     const now = new Date();
     const jstString = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(
@@ -183,7 +296,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           timestamp: jstString,
           actor: 'User',
           action: '新規タスク起票',
-          detail: 'Web UIより登録',
         },
       ],
       createdBy: 'Web UI',
@@ -192,10 +304,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     setTasks((prev) => [newTask, ...prev]);
     showToast(`タスク [${newId}] を作成しました`, 'success');
+
+    // D1へ非同期同期
+    if (!isSampleMode) {
+      const ok = await ApiService.saveTask(newTask);
+      if (!ok) {
+        showToast('サーバーへの即時反映に失敗しました。ローカル保存済みです。', 'warning');
+      }
+    }
+
     return newTask;
   };
 
-  const updateTask = (updated: Task) => {
+  const updateTask = async (updated: Task) => {
     const now = new Date();
     const jstString = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(
       now.getDate()
@@ -212,9 +333,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setSelectedTask(taskWithTimestamp);
     }
     showToast(`タスク [${updated.id}] を更新しました`, 'info');
+
+    // D1へ反映
+    if (!isSampleMode) {
+      await ApiService.saveTask(taskWithTimestamp);
+    }
   };
 
-  const updateTaskStatus = (taskId: string, status: TaskStatus, confirmed = true) => {
+  const updateTaskStatus = async (taskId: string, status: TaskStatus, confirmed = true) => {
     const target = tasks.find((t) => t.id === taskId);
     if (!target) return;
 
@@ -240,16 +366,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         ...target.history,
       ],
     };
-    updateTask(updated);
+    await updateTask(updated);
   };
 
-  const deleteTask = (taskId: string) => {
+  const deleteTask = async (taskId: string) => {
     setTasks((prev) => prev.filter((t) => t.id !== taskId));
     if (selectedTask?.id === taskId) {
       setSelectedTask(null);
       setIsDetailModalOpen(false);
     }
     showToast(`タスク [${taskId}] を削除しました`, 'warning');
+
+    if (!isSampleMode) {
+      await ApiService.deleteTask(taskId);
+    }
   };
 
   const copyPromptToClipboard = async (text: string): Promise<boolean> => {
@@ -257,8 +387,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       await navigator.clipboard.writeText(text);
       showToast('引き継ぎ指示書をクリップボードにコピーしました！', 'success');
       return true;
-    } catch (e) {
-      console.error('Failed to copy', e);
+    } catch {
       showToast('コピーに失敗しました。手動で選択してコピーしてください', 'error');
       return false;
     }
@@ -269,11 +398,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     showToast('設定を保存しました', 'success');
   };
 
-  const refreshUsage = () => {
-    // 枠再読込（初期値または最新データ）
-    const usage = StorageService.getAIUsage();
-    setAiUsage(usage);
-    showToast('AI利用状況を再読み込みしました', 'info');
+  const refreshUsage = async () => {
+    showToast('AI利用状況を更新中...', 'info');
+    try {
+      const data = await ApiService.getUsage();
+      if (data && data.entries.length > 0) {
+        setAiUsage(data);
+        showToast('最新の利用状況を取得しました', 'success');
+      } else {
+        showToast('PCローカル側の定期監視スクリプトが待機中です。最新データはありません。', 'warning');
+      }
+    } catch {
+      showToast('利用状況の同期に失敗しました', 'error');
+    }
   };
 
   const exportData = () => {
@@ -316,6 +453,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         isCreateModalOpen,
         isDetailModalOpen,
         isAuthenticated,
+        syncStatus,
+        isSampleMode,
         toasts,
         staleTasksCount,
         setActiveView,
@@ -323,9 +462,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setSelectedTask,
         setIsCreateModalOpen,
         setIsDetailModalOpen,
-        login,
+        loginWithKey,
         logout,
         showToast,
+        syncWithServer,
+        enableSampleMode,
+        clearToProductionMode,
         createTask,
         updateTask,
         updateTaskStatus,

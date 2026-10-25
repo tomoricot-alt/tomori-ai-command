@@ -1,25 +1,26 @@
-import { INITIAL_AI_USAGE, INITIAL_TASKS } from '../constants/initialData';
+import { INITIAL_AI_USAGE, INITIAL_TASKS, SAMPLE_AI_USAGE, SAMPLE_TASKS } from '../constants/initialData';
 import { INITIAL_PROJECTS } from '../constants/projects';
 import { AIUsageData, ProjectInfo, Task } from '../types';
 
 const STORAGE_KEYS = {
-  TASKS: 'tomori_ai_command_tasks_v1',
-  PROJECTS: 'tomori_ai_command_projects_v1',
-  USAGE: 'tomori_ai_command_usage_v1',
-  AUTH: 'tomori_ai_command_auth_v1',
-  SETTINGS: 'tomori_ai_command_settings_v1',
+  TASKS: 'tomori_ai_command_tasks_v2',
+  PROJECTS: 'tomori_ai_command_projects_v2',
+  USAGE: 'tomori_ai_command_usage_v2',
+  SETTINGS: 'tomori_ai_command_settings_v2',
+  IS_SAMPLE_MODE: 'tomori_ai_command_is_sample_mode',
 };
 
 export interface AppSettings {
   autoHandoffCopy: boolean;
   alertStaleHours: number; // 更新なしアラート基準時間（デフォルト2時間）
-  d1ApiEndpoint?: string;
-  d1ApiToken?: string;
+  cloudSyncEnabled: boolean;
+  apiSecretKey?: string;
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
   autoHandoffCopy: true,
   alertStaleHours: 2,
+  cloudSyncEnabled: true,
 };
 
 export class StorageService {
@@ -103,9 +104,30 @@ export class StorageService {
     }
   }
 
+  static isSampleMode(): boolean {
+    return localStorage.getItem(STORAGE_KEYS.IS_SAMPLE_MODE) === 'true';
+  }
+
+  static setSampleMode(enabled: boolean): void {
+    localStorage.setItem(STORAGE_KEYS.IS_SAMPLE_MODE, enabled ? 'true' : 'false');
+  }
+
+  static loadSampleData(): { tasks: Task[]; usage: AIUsageData } {
+    this.saveTasks(SAMPLE_TASKS);
+    this.saveAIUsage(SAMPLE_AI_USAGE);
+    this.setSampleMode(true);
+    return { tasks: SAMPLE_TASKS, usage: SAMPLE_AI_USAGE };
+  }
+
+  static clearLocalCache(): void {
+    localStorage.removeItem(STORAGE_KEYS.TASKS);
+    localStorage.removeItem(STORAGE_KEYS.USAGE);
+    this.setSampleMode(false);
+  }
+
   static exportBackup(): string {
     const backup = {
-      version: '1.0',
+      version: '2.0',
       exportedAt: new Date().toISOString(),
       tasks: this.getTasks(),
       projects: this.getProjects(),
@@ -126,18 +148,6 @@ export class StorageService {
     } catch (e) {
       console.error('Failed to import backup', e);
       return false;
-    }
-  }
-
-  static isAuthenticated(): boolean {
-    return sessionStorage.getItem(STORAGE_KEYS.AUTH) === 'authenticated';
-  }
-
-  static setAuthenticated(status: boolean): void {
-    if (status) {
-      sessionStorage.setItem(STORAGE_KEYS.AUTH, 'authenticated');
-    } else {
-      sessionStorage.removeItem(STORAGE_KEYS.AUTH);
     }
   }
 }

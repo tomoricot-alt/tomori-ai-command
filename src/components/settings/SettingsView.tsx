@@ -1,30 +1,41 @@
 import React, { useRef, useState } from 'react';
 import {
+  Check,
   Cloud,
   Database,
   Download,
   KeyRound,
-  Lock,
   RefreshCw,
   Save,
   Settings,
   Shield,
+  Sparkles,
   Upload,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 
 export const SettingsView: React.FC = () => {
-  const { settings, updateSettings, exportData, importData, showToast } = useApp();
+  const {
+    settings,
+    updateSettings,
+    exportData,
+    importData,
+    syncWithServer,
+    syncStatus,
+    isSampleMode,
+    enableSampleMode,
+    clearToProductionMode,
+  } = useApp();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [staleHours, setStaleHours] = useState(settings.alertStaleHours);
-  const [d1Endpoint, setD1Endpoint] = useState(settings.d1ApiEndpoint || '');
+  const [apiKey, setApiKey] = useState(settings.apiSecretKey || '');
 
   const handleSaveSettings = (e: React.FormEvent) => {
     e.preventDefault();
     updateSettings({
       alertStaleHours: staleHours,
-      d1ApiEndpoint: d1Endpoint,
+      apiSecretKey: apiKey,
     });
   };
 
@@ -48,56 +59,102 @@ export const SettingsView: React.FC = () => {
       <div>
         <h1 className="text-lg md:text-xl font-bold text-white flex items-center gap-2">
           <Settings className="w-5 h-5 text-indigo-400" />
-          <span>システム設定 & データ永続化</span>
+          <span>システム設定 & クラウド同期</span>
         </h1>
         <p className="text-xs text-slate-400 mt-0.5">
-          PCとiPhone間のデータ同期、Cloudflare D1接続設定、セキュリティとバックアップ。
+          PC・iPhone間のデータ同期（Cloudflare D1）、セキュリティ認証、バックアップ。
         </p>
       </div>
 
-      {/* Cloudflare D1 & Cloud Architecture Status */}
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-3 shadow-xl">
-        <div className="flex items-center gap-2.5 text-indigo-300 font-bold text-sm">
-          <Cloud className="w-5 h-5 text-indigo-400" />
-          <span>Cloudflare D1 / Workers クラウド同期アダプター</span>
+      {/* Cloudflare D1 Sync Status & Mode Selection */}
+      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4 shadow-xl">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2.5 text-indigo-300 font-bold text-sm">
+            <Cloud className="w-5 h-5 text-indigo-400" />
+            <span>Cloudflare D1 クラウド永続同期（PC・iPhone共有）</span>
+          </div>
+          <span
+            className={`text-xs px-2.5 py-1 rounded-full font-semibold border ${
+              isSampleMode
+                ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                : syncStatus.online
+                ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                : 'bg-rose-500/20 text-rose-300 border-rose-500/40'
+            }`}
+          >
+            {isSampleMode ? 'サンプル/デモ表示中' : syncStatus.online ? 'D1同期有効' : 'オフライン'}
+          </span>
+        </div>
+
+        <p className="text-xs text-slate-400 leading-relaxed">
+          タスクおよび成果物は、Cloudflare Workers + D1（無料枠）によりクラウド上で永続管理されます。
+          PCまたはiPhoneのSafariで開いても同一の最新データがリアルタイムに参照・更新されます。
+        </p>
+
+        <div className="flex flex-wrap items-center gap-3 pt-1">
+          <button
+            onClick={() => syncWithServer()}
+            className="flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold px-4 py-2 rounded-xl transition-colors cursor-pointer"
+          >
+            <RefreshCw className="w-3.5 h-3.5" />
+            <span>今すぐD1と強制再同期</span>
+          </button>
+
+          {isSampleMode ? (
+            <button
+              onClick={clearToProductionMode}
+              className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold px-4 py-2 rounded-xl border border-slate-700 transition-colors cursor-pointer"
+            >
+              <span>本番D1モードへ切り替え</span>
+            </button>
+          ) : (
+            <button
+              onClick={enableSampleMode}
+              className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-amber-300 text-xs font-semibold px-4 py-2 rounded-xl border border-slate-700 transition-colors cursor-pointer"
+            >
+              <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+              <span>サンプルデータで表示確認</span>
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Security & Access Protection Info */}
+      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4 shadow-xl">
+        <div className="flex items-center gap-2.5 text-white font-bold text-sm">
+          <Shield className="w-5 h-5 text-emerald-400" />
+          <span>サーバー側認証 & Cloudflare Access連携</span>
         </div>
         <p className="text-xs text-slate-400 leading-relaxed">
-          初期版では端末内の `localStorage`
-          で完全ローカル動作し、不要なクラウド課金を一切発生させません。
-          Cloudflare D1（無料枠）のエンドポイントを登録することで、PCとiPhone間の双方向自動同期へシームレスに拡張可能です。
+          安全性を担保するため、ブラウザ単独の簡易PIN判定を廃止し、Cloudflare Workers API側でのセッショントークン検証およびCloudflare Access（ゼロトラスト認証）に対応しています。
+          認証されていない第三者にはタスクAPIや機密業務データが一切返却されません。
         </p>
 
         <form onSubmit={handleSaveSettings} className="space-y-3 pt-2">
           <div>
             <label className="block text-[11px] font-semibold text-slate-300 mb-1">
-              Cloudflare D1 API エンドポイント（任意）
+              API シークレットキー（Workers環境変数 `API_SECRET_KEY` と照合）
             </label>
             <input
-              type="text"
-              value={d1Endpoint}
-              onChange={(e) => setD1Endpoint(e.target.value)}
-              placeholder="https://tomori-ai-command-api.workers.dev/sync"
-              className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500"
+              type="password"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder="Cloudflare API Secret Key"
+              className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 font-mono"
             />
           </div>
 
-          <div className="flex items-center justify-between pt-1">
-            <span className="text-[11px] text-emerald-400 flex items-center gap-1">
-              <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
-              ローカルストレージ永続化モード稼働中
-            </span>
-            <button
-              type="submit"
-              className="flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold px-4 py-2 rounded-xl transition-colors cursor-pointer"
-            >
-              <Save className="w-3.5 h-3.5" />
-              <span>設定を保存</span>
-            </button>
-          </div>
+          <button
+            type="submit"
+            className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-white text-xs font-semibold px-4 py-2 rounded-xl border border-slate-700 transition-colors cursor-pointer"
+          >
+            <Save className="w-3.5 h-3.5" />
+            <span>認証設定を保存</span>
+          </button>
         </form>
       </div>
 
-      {/* Backup & Restore (PC / iPhone Migration) */}
+      {/* Backup & Restore (JSON Export / Import) */}
       <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4 shadow-xl">
         <div className="flex items-center gap-2.5 text-white font-bold text-sm">
           <Database className="w-5 h-5 text-indigo-400" />
@@ -170,18 +227,6 @@ export const SettingsView: React.FC = () => {
             <span>監視基準を保存</span>
           </button>
         </div>
-      </div>
-
-      {/* Security & Access Protection Info */}
-      <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-5 space-y-2">
-        <div className="flex items-center gap-2 text-white font-bold text-sm">
-          <KeyRound className="w-4 h-4 text-emerald-400" />
-          <span>認証PINコード</span>
-        </div>
-        <p className="text-xs text-slate-400 leading-relaxed">
-          現在の標準アクセスコードは <code className="text-indigo-300 bg-slate-800 px-1.5 py-0.5 rounded font-mono">2026</code> です。
-          Cloudflare Pages公開時はCloudflare Access（ゼロトラスト認証）との併用を推奨します。
-        </p>
       </div>
     </div>
   );

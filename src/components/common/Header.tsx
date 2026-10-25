@@ -4,7 +4,8 @@ import {
   Bot,
   CheckCircle2,
   Clock,
-  Layers,
+  Cloud,
+  CloudOff,
   Lock,
   Plus,
   RefreshCw,
@@ -23,7 +24,10 @@ export const Header: React.FC = () => {
     setIsCreateModalOpen,
     isAuthenticated,
     logout,
-    login,
+    syncStatus,
+    syncWithServer,
+    isSampleMode,
+    clearToProductionMode,
   } = useApp();
 
   const runningCount = tasks.filter((t) => t.status === '実行中').length;
@@ -65,10 +69,47 @@ export const Header: React.FC = () => {
         </div>
       </div>
 
-      {/* Status pills & Quick Actions */}
+      {/* Status pills, Cloud Sync, & Quick Actions */}
       <div className="flex items-center gap-2">
+        {/* Sample Mode Banner if active */}
+        {isSampleMode && (
+          <div className="hidden lg:flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-500/20 text-amber-300 border border-amber-500/30 text-[11px]">
+            <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+            <span>サンプル表示中</span>
+            <button
+              onClick={clearToProductionMode}
+              className="underline ml-1 hover:text-white cursor-pointer"
+            >
+              本番D1へ切替
+            </button>
+          </div>
+        )}
+
+        {/* Cloudflare D1 Sync Badge */}
+        {!isSampleMode && (
+          <button
+            onClick={() => syncWithServer()}
+            title={`D1同期: ${syncStatus.message || '正常'}`}
+            className={`hidden md:flex items-center gap-1 px-2.5 py-1 rounded-lg border text-xs transition-colors cursor-pointer ${
+              syncStatus.online && syncStatus.synced
+                ? 'bg-slate-800/80 border-slate-700 text-slate-300 hover:bg-slate-800'
+                : 'bg-amber-950/40 border-amber-800/60 text-amber-300'
+            }`}
+          >
+            {syncStatus.online ? (
+              <Cloud className="w-3.5 h-3.5 text-indigo-400" />
+            ) : (
+              <CloudOff className="w-3.5 h-3.5 text-amber-400" />
+            )}
+            <span className="text-[11px]">
+              {syncStatus.online ? 'D1同期中' : 'オフライン'}
+            </span>
+            <RefreshCw className="w-3 h-3 text-slate-400 ml-0.5" />
+          </button>
+        )}
+
         {/* Quick status summary badge */}
-        <div className="hidden md:flex items-center gap-2 text-xs">
+        <div className="hidden xl:flex items-center gap-2 text-xs">
           <div className="flex items-center gap-1 px-2 py-1 rounded bg-blue-950/40 border border-blue-800/40 text-blue-300">
             <Clock className="w-3.5 h-3.5 text-blue-400 animate-spin" />
             <span>実行中 {runningCount}</span>
@@ -100,11 +141,9 @@ export const Header: React.FC = () => {
           onClick={() => {
             if (isAuthenticated) {
               logout();
-            } else {
-              login('2026');
             }
           }}
-          title={isAuthenticated ? '認証済み（クリックでロック）' : '未認証（クリックで解除）'}
+          title={isAuthenticated ? '認証済み（クリックでログアウト）' : '未認証'}
           className={`p-1.5 rounded-lg border text-xs flex items-center gap-1 transition-colors cursor-pointer ${
             isAuthenticated
               ? 'bg-slate-800/60 border-emerald-500/40 text-emerald-400 hover:bg-slate-800'
