@@ -1,16 +1,52 @@
 import { describe, expect, it } from 'vitest';
 import {
+  base64UrlEncode,
+  clearJwksCache,
   createSessionToken,
   isSecretKeyValid,
   verifyCfAccessJwt,
   verifySessionToken,
 } from '../../functions/api/_auth-utils';
-import { AI_SERVICES } from '../constants/aiConfig';
 import { INITIAL_AI_USAGE, INITIAL_TASKS, SAMPLE_AI_USAGE, SAMPLE_TASKS } from '../constants/initialData';
 import { ApiService } from '../services/api';
 import { PromptGeneratorService } from '../services/promptGenerator';
 import { RouterService } from '../services/router';
-import { StorageService } from '../services/storage';
+
+async function generateTestRsaKeyPair(kid: string) {
+  const keyPair = await crypto.subtle.generateKey(
+    {
+      name: 'RSASSA-PKCS1-v1_5',
+      modulusLength: 2048,
+      publicExponent: new Uint8Array([1, 0, 1]),
+      hash: 'SHA-256',
+    },
+    true,
+    ['sign', 'verify']
+  );
+  const publicJwk = (await crypto.subtle.exportKey('jwk', keyPair.publicKey)) as JsonWebKey & {
+    kid: string;
+    use: string;
+  };
+  publicJwk.kid = kid;
+  publicJwk.alg = 'RS256';
+  publicJwk.use = 'sig';
+  return { keyPair, publicJwk };
+}
+
+async function signTestCfJwt(
+  payload: Record<string, any>,
+  privateKey: CryptoKey,
+  kid = 'test-cf-access-key-1',
+  alg = 'RS256'
+): Promise<string> {
+  const enc = new TextEncoder();
+  const headerB64 = base64UrlEncode(enc.encode(JSON.stringify({ alg, kid, typ: 'JWT' })));
+  const payloadB64 = base64UrlEncode(enc.encode(JSON.stringify(payload)));
+  const signingInput = `${headerB64}.${payloadB64}`;
+  const sig = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', privateKey, enc.encode(signingInput));
+  const sigB64 = base64UrlEncode(new Uint8Array(sig));
+  return `${signingInput}.${sigB64}`;
+}
 
 describe('TOMORI AI COMMAND 厳格セキュリティ・D1同期・機能総合検証テスト', () => {
   const TEST_VALID_SECRET = 'a_very_secure_and_long_production_secret_key_2026';
@@ -36,43 +72,145 @@ describe('TOMORI AI COMMAND 厳格セキュリティ・D1同期・機能総合�
     expect(isSecretKeyValid(TEST_VALID_SECRET)).toBe(true);
   });
 
-  // 2. 認証回避防止：Cloudflare Access JWT検証
-  it('2. [セキュリティ] Cloudflare Access JWTの改ざん・期限切れ・オーディエンス不一致を検知し拒絶すること', () => {
-    // 改ざんされたトークン（形式不正）
-    const malformed = verifyCfAccessJwt('invalid.token.here');
-    expect(malformed.valid).toBe(false);
+  // 2. Cloudflare Access 公開鍵（JWKS）署名検証・Fail-Closed検証
+  it('2. [セキュリティ] Cloudflare Access JWTのJWKS暗号署名検証・偽造/改ざん/期限切れ/不正Audienceの完全遮断', async () => {
+    clearJwksCache();
+    const TEST_TEAM = 'tomori-team';
+    const TEST_AUD = 'aud-valid-uuid-2026';
+    const KID = 'test-key-id-valid';
 
-    // 期限切れJWTのシミュレーション（expが過去）
-    const pastExp = Math.floor(Date.now() / 1000) - 300;
-    const expiredPayload = {
-      sub: 'user-1',
-      email: 'test@example.com',
-      exp: pastExp,
-      iss: 'https://testteam.cloudflareaccess.com',
-      aud: 'valid-aud',
+    // 正当な鍵ペアと攻撃者（偽造用）の鍵ペアを生成
+    const { keyPair: validKeys, publicJwk: validPublicJwk } = await generateTestRsaKeyPair(KID);
+    const { keyPair: attackerKeys } = await generateTestRsaKeyPair(KID);
+
+    const nowSec = Math.floor(Date.now() / 1000);
+    const validPayload = {
+      sub: 'usr-12345',
+      email: 'admin@tomori-cot.com',
+      iss: `https://${TEST_TEAM}.cloudflareaccess.com`,
+      aud: TEST_AUD,
+      exp: nowSec + 3600,
+      nbf: nowSec - 10,
     };
-    const b64Payload = Buffer.from(JSON.stringify(expiredPayload)).toString('base64url');
-    const expiredJwt = `header.${b64Payload}.signature`;
 
-    const expiredResult = verifyCfAccessJwt(expiredJwt, 'testteam', 'valid-aud');
+    // A. 正当なRSA署名と有効なクレームを持つJWTの検証成功
+    const validJwt = await signTestCfJwt(validPayload, validKeys.privateKey, KID);
+    const validResult = await verifyCfAccessJwt(validJwt, {
+      teamDomain: TEST_TEAM,
+      aud: TEST_AUD,
+      jwksKeys: [validPublicJwk],
+    });
+    expect(validResult.valid).toBe(true);
+    expect(validResult.email).toBe('admin@tomori-cot.com');
+
+    // Positional 引数形式 (jwt, teamDomain, aud, { jwksKeys }) の動作確認
+    const positionalResult = await verifyCfAccessJwt(validJwt, TEST_TEAM, TEST_AUD, {
+      jwksKeys: [validPublicJwk],
+    });
+    expect(positionalResult.valid).toBe(true);
+    expect(positionalResult.email).toBe('admin@tomori-cot.com');
+
+    // B. 偽造JWT（不正な攻撃者の鍵で署名）の検知・遮断
+    const forgedJwt = await signTestCfJwt(validPayload, attackerKeys.privateKey, KID);
+    const forgedResult = await verifyCfAccessJwt(forgedJwt, {
+      teamDomain: TEST_TEAM,
+      aud: TEST_AUD,
+      jwksKeys: [validPublicJwk],
+    });
+    expect(forgedResult.valid).toBe(false);
+    expect(forgedResult.error).toContain('Invalid cryptographic signature');
+
+    // C. 署名改ざん（ペイロードまたは署名の変更）の検知・遮断
+    const parts = validJwt.split('.');
+    const tamperedPayload = base64UrlEncode(
+      new TextEncoder().encode(JSON.stringify({ ...validPayload, email: 'hacker@malicious.com' }))
+    );
+    const tamperedJwt = `${parts[0]}.${tamperedPayload}.${parts[2]}`;
+    const tamperedResult = await verifyCfAccessJwt(tamperedJwt, {
+      teamDomain: TEST_TEAM,
+      aud: TEST_AUD,
+      jwksKeys: [validPublicJwk],
+    });
+    expect(tamperedResult.valid).toBe(false);
+    expect(tamperedResult.error).toContain('Invalid cryptographic signature');
+
+    // D. 有効期限切れ（expが過去）の検知・遮断
+    const expiredPayload = { ...validPayload, exp: nowSec - 60 };
+    const expiredJwt = await signTestCfJwt(expiredPayload, validKeys.privateKey, KID);
+    const expiredResult = await verifyCfAccessJwt(expiredJwt, {
+      teamDomain: TEST_TEAM,
+      aud: TEST_AUD,
+      jwksKeys: [validPublicJwk],
+    });
     expect(expiredResult.valid).toBe(false);
     expect(expiredResult.error).toContain('expired');
 
-    // Audience不一致の検知
-    const futureExp = Math.floor(Date.now() / 1000) + 3600;
-    const wrongAudPayload = {
-      sub: 'user-1',
-      email: 'test@example.com',
-      exp: futureExp,
-      iss: 'https://testteam.cloudflareaccess.com',
-      aud: 'different-aud',
-    };
-    const b64WrongAud = Buffer.from(JSON.stringify(wrongAudPayload)).toString('base64url');
-    const wrongAudJwt = `header.${b64WrongAud}.signature`;
+    // E. 有効開始前（nbfが未来）の検知・遮断
+    const futurePayload = { ...validPayload, nbf: nowSec + 300 };
+    const futureJwt = await signTestCfJwt(futurePayload, validKeys.privateKey, KID);
+    const futureResult = await verifyCfAccessJwt(futureJwt, {
+      teamDomain: TEST_TEAM,
+      aud: TEST_AUD,
+      jwksKeys: [validPublicJwk],
+    });
+    expect(futureResult.valid).toBe(false);
+    expect(futureResult.error).toContain('Token not yet valid');
 
-    const wrongAudResult = verifyCfAccessJwt(wrongAudJwt, 'testteam', 'expected-aud');
+    // F. 不正なAudience（aud不一致）の検知・遮断
+    const wrongAudPayload = { ...validPayload, aud: 'wrong-audience-uuid' };
+    const wrongAudJwt = await signTestCfJwt(wrongAudPayload, validKeys.privateKey, KID);
+    const wrongAudResult = await verifyCfAccessJwt(wrongAudJwt, {
+      teamDomain: TEST_TEAM,
+      aud: TEST_AUD,
+      jwksKeys: [validPublicJwk],
+    });
     expect(wrongAudResult.valid).toBe(false);
     expect(wrongAudResult.error).toContain('Audience mismatch');
+
+    // G. 不正なIssuer（iss不一致）の検知・遮断
+    const wrongIssPayload = { ...validPayload, iss: 'https://attacker.cloudflareaccess.com' };
+    const wrongIssJwt = await signTestCfJwt(wrongIssPayload, validKeys.privateKey, KID);
+    const wrongIssResult = await verifyCfAccessJwt(wrongIssJwt, {
+      teamDomain: TEST_TEAM,
+      aud: TEST_AUD,
+      jwksKeys: [validPublicJwk],
+    });
+    expect(wrongIssResult.valid).toBe(false);
+    expect(wrongIssResult.error).toContain('Invalid issuer');
+
+    // H. メールアドレス欠落（emailなし/空文字）の検知・遮断
+    const noEmailPayload = { ...validPayload, email: '' };
+    const noEmailJwt = await signTestCfJwt(noEmailPayload, validKeys.privateKey, KID);
+    const noEmailResult = await verifyCfAccessJwt(noEmailJwt, {
+      teamDomain: TEST_TEAM,
+      aud: TEST_AUD,
+      jwksKeys: [validPublicJwk],
+    });
+    expect(noEmailResult.valid).toBe(false);
+    expect(noEmailResult.error).toContain('email');
+
+    // I. 未知のKey ID（JWKSに登録されていないkid）の検知・遮断
+    const unknownKidJwt = await signTestCfJwt(validPayload, validKeys.privateKey, 'unknown-kid-999');
+    const unknownKidResult = await verifyCfAccessJwt(unknownKidJwt, {
+      teamDomain: TEST_TEAM,
+      aud: TEST_AUD,
+      jwksKeys: [validPublicJwk],
+    });
+    expect(unknownKidResult.valid).toBe(false);
+    expect(unknownKidResult.error).toContain('not found in JWKS');
+
+    // J. 環境変数未設定（Fail-Closed）の検知・遮断
+    const noEnvResult1 = await verifyCfAccessJwt(validJwt, undefined, TEST_AUD);
+    expect(noEnvResult1.valid).toBe(false);
+    expect(noEnvResult1.error).toContain('CF_ACCESS_TEAM_DOMAIN is not configured');
+
+    const noEnvResult2 = await verifyCfAccessJwt(validJwt, TEST_TEAM, undefined);
+    expect(noEnvResult2.valid).toBe(false);
+    expect(noEnvResult2.error).toContain('CF_ACCESS_AUD is not configured');
+
+    // K. 形式不正JWTの遮断
+    const malformedResult = await verifyCfAccessJwt('malformed.jwt', TEST_TEAM, TEST_AUD);
+    expect(malformedResult.valid).toBe(false);
   });
 
   // 3. セッショントークンの暗号学的署名・有効期限検証

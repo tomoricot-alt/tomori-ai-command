@@ -21,7 +21,7 @@ export const onRequest: PagesFunction<Env> = async (context) => {
   // ※ 単なる「Cf-Access-Authenticated-User-Email」ヘッダーの存在は信用しない（偽装防止）
   const cfAccessJwt = request.headers.get('Cf-Access-Jwt-Assertion');
   if (cfAccessJwt) {
-    const cfResult = verifyCfAccessJwt(
+    const cfResult = await verifyCfAccessJwt(
       cfAccessJwt,
       env.CF_ACCESS_TEAM_DOMAIN,
       env.CF_ACCESS_AUD
