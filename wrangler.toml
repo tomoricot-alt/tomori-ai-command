@@ -1,0 +1,9 @@
+name = "tomori-ai-command"
+compatibility_date = "2026-10-01"
+pages_build_output_dir = "dist"
+
+# Cloudflare D1 Database binding for Phase 2/3
+# [[d1_databases]]
+# binding = "DB"
+# database_name = "tomori-ai-command-db"
+# database_id = "<your-d1-id>"
