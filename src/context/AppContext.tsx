@@ -192,15 +192,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // サーバー側APIログイン
   const loginWithKey = async (key: string): Promise<boolean> => {
-    const success = await ApiService.login(key);
-    if (success) {
+    const res = await ApiService.login(key);
+    if (res.success) {
       setIsAuthenticated(true);
       setSyncStatus((prev) => ({ ...prev, authError: false }));
-      showToast('認証に成功しました。D1同期を開始します。', 'success');
+      showToast('認証に成功しました。セッショントークンを取得しました。', 'success');
       await syncWithServer();
       return true;
     }
-    showToast('アクセスキーが無効です。', 'error');
+    showToast(res.message || 'アクセスキーが無効です。', 'error');
     return false;
   };
 
@@ -307,9 +307,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     // D1へ非同期同期
     if (!isSampleMode) {
-      const ok = await ApiService.saveTask(newTask);
-      if (!ok) {
-        showToast('サーバーへの即時反映に失敗しました。ローカル保存済みです。', 'warning');
+      const res = await ApiService.saveTask(newTask);
+      if (!res.success) {
+        if (res.conflict) {
+          showToast('⚠️ 別の端末で競合が発生しました。最新データを同期します。', 'warning');
+          await syncWithServer();
+        } else {
+          showToast(`D1同期警告: ${res.error || 'ローカル保存済み'}`, 'warning');
+        }
       }
     }
 
@@ -336,7 +341,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     // D1へ反映
     if (!isSampleMode) {
-      await ApiService.saveTask(taskWithTimestamp);
+      const res = await ApiService.saveTask(taskWithTimestamp);
+      if (!res.success) {
+        if (res.conflict) {
+          showToast('⚠️ 別の端末で既に更新されています（409 Conflict）。最新データを再取得します。', 'error');
+          await syncWithServer();
+        } else {
+          showToast(`D1同期注意: ${res.error || 'オフラインキャッシュ使用'}`, 'warning');
+        }
+      } else if (res.task?.version) {
+        // 採番された最新バージョンをローカル状態に反映
+        setTasks((prev) => prev.map((t) => (t.id === updated.id ? { ...t, version: res.task?.version } : t)));
+      }
     }
   };
 

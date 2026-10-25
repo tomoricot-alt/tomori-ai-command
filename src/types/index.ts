@@ -61,6 +61,7 @@ export interface Task {
   lastConfirmedAt: string;
   createdAt: string;
   updatedAt: string;
+  version?: number;
   sourceUrl?: string; // 元の会話やGitHubへのURL
   instructionPrompt: string; // 9項目構造化引き継ぎプロンプト
   resultSummary?: string; // 作業結果・成果

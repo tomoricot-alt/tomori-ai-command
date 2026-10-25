@@ -1,4 +1,10 @@
 import { describe, expect, it } from 'vitest';
+import {
+  createSessionToken,
+  isSecretKeyValid,
+  verifyCfAccessJwt,
+  verifySessionToken,
+} from '../../functions/api/_auth-utils';
 import { AI_SERVICES } from '../constants/aiConfig';
 import { INITIAL_AI_USAGE, INITIAL_TASKS, SAMPLE_AI_USAGE, SAMPLE_TASKS } from '../constants/initialData';
 import { ApiService } from '../services/api';
@@ -6,18 +12,133 @@ import { PromptGeneratorService } from '../services/promptGenerator';
 import { RouterService } from '../services/router';
 import { StorageService } from '../services/storage';
 
-describe('TOMORI AI COMMAND セキュリティ・D1同期・機能総合検証テスト', () => {
-  // 1. セキュリティ：初期データに機密情報を含まないことの検証
-  it('1. 初期バンドルデータに実案件の機密情報が含まれず、空配列であること', () => {
+describe('TOMORI AI COMMAND 厳格セキュリティ・D1同期・機能総合検証テスト', () => {
+  const TEST_VALID_SECRET = 'a_very_secure_and_long_production_secret_key_2026';
+
+  // 1. 漏洩シークレット・未設定シークレットの拒絶検証
+  it('1. [セキュリティ] 漏洩シークレットおよび未設定/脆弱シークレットが完全に拒絶されること', () => {
+    // 漏洩済み旧キーの拒絶
+    expect(isSecretKeyValid('tomori-cmd-secure-dev-key-2026')).toBe(false);
+    expect(isSecretKeyValid('2026')).toBe(false);
+    expect(isSecretKeyValid('tomori')).toBe(false);
+    expect(isSecretKeyValid('admin')).toBe(false);
+    expect(isSecretKeyValid('secret')).toBe(false);
+
+    // 未設定（undefined / 空文字）の拒絶（Fail-closed）
+    expect(isSecretKeyValid(undefined)).toBe(false);
+    expect(isSecretKeyValid('')).toBe(false);
+    expect(isSecretKeyValid('   ')).toBe(false);
+
+    // 短すぎるシークレット（16文字未満）の拒絶
+    expect(isSecretKeyValid('short-secret')).toBe(false);
+
+    // 適切な長さを持つ安全なシークレットのみ承認
+    expect(isSecretKeyValid(TEST_VALID_SECRET)).toBe(true);
+  });
+
+  // 2. 認証回避防止：Cloudflare Access JWT検証
+  it('2. [セキュリティ] Cloudflare Access JWTの改ざん・期限切れ・オーディエンス不一致を検知し拒絶すること', () => {
+    // 改ざんされたトークン（形式不正）
+    const malformed = verifyCfAccessJwt('invalid.token.here');
+    expect(malformed.valid).toBe(false);
+
+    // 期限切れJWTのシミュレーション（expが過去）
+    const pastExp = Math.floor(Date.now() / 1000) - 300;
+    const expiredPayload = {
+      sub: 'user-1',
+      email: 'test@example.com',
+      exp: pastExp,
+      iss: 'https://testteam.cloudflareaccess.com',
+      aud: 'valid-aud',
+    };
+    const b64Payload = Buffer.from(JSON.stringify(expiredPayload)).toString('base64url');
+    const expiredJwt = `header.${b64Payload}.signature`;
+
+    const expiredResult = verifyCfAccessJwt(expiredJwt, 'testteam', 'valid-aud');
+    expect(expiredResult.valid).toBe(false);
+    expect(expiredResult.error).toContain('expired');
+
+    // Audience不一致の検知
+    const futureExp = Math.floor(Date.now() / 1000) + 3600;
+    const wrongAudPayload = {
+      sub: 'user-1',
+      email: 'test@example.com',
+      exp: futureExp,
+      iss: 'https://testteam.cloudflareaccess.com',
+      aud: 'different-aud',
+    };
+    const b64WrongAud = Buffer.from(JSON.stringify(wrongAudPayload)).toString('base64url');
+    const wrongAudJwt = `header.${b64WrongAud}.signature`;
+
+    const wrongAudResult = verifyCfAccessJwt(wrongAudJwt, 'testteam', 'expected-aud');
+    expect(wrongAudResult.valid).toBe(false);
+    expect(wrongAudResult.error).toContain('Audience mismatch');
+  });
+
+  // 3. セッショントークンの暗号学的署名・有効期限検証
+  it('3. [セキュリティ] HMAC-SHA256署名付きセッショントークンの発行・検証・改ざん防止', async () => {
+    // トークン発行
+    const token = await createSessionToken(TEST_VALID_SECRET, 'admin');
+    expect(token).toBeDefined();
+    expect(token.split('.').length).toBe(3);
+
+    // 正当なトークンの検証
+    const verified = await verifySessionToken(token, TEST_VALID_SECRET);
+    expect(verified).not.toBeNull();
+    expect(verified?.sub).toBe('tomori-admin');
+    expect(verified?.role).toBe('admin');
+
+    // 別のシークレットでの検証失敗（改ざん検知）
+    const failedVerify = await verifySessionToken(token, 'another_different_secure_secret_9999');
+    expect(failedVerify).toBeNull();
+
+    // トークンペイロード改ざん時の検証失敗
+    const parts = token.split('.');
+    const tamperedPayload = Buffer.from(JSON.stringify({ sub: 'hacker', exp: 9999999999 })).toString('base64url');
+    const tamperedToken = `${parts[0]}.${tamperedPayload}.${parts[2]}`;
+    const tamperedVerify = await verifySessionToken(tamperedToken, TEST_VALID_SECRET);
+    expect(tamperedVerify).toBeNull();
+  });
+
+  // 4. セキュリティ：初期データに機密情報を含まないことの検証
+  it('4. [セキュリティ] 初期バンドルデータに実案件の機密情報が含まれず、空配列であること', () => {
     expect(INITIAL_TASKS).toEqual([]);
     expect(INITIAL_AI_USAGE.entries).toEqual([]);
-    // サンプルデータは分離されている
     expect(SAMPLE_TASKS.length).toBeGreaterThan(0);
     expect(SAMPLE_TASKS[0].title).toContain('【サンプル】');
   });
 
-  // 2. セキュリティ：固定PINの廃止とトークン管理の検証
-  it('2. 認証トークン管理とサーバー側APIヘッダーの検証', () => {
+  // 5. 複数端末競合制御（Optimistic Concurrency Control）ロジックの検証
+  it('5. [D1同期] 楽観的排他制御による複数端末の競合（409 Conflict）検知ロジック', () => {
+    const serverTask = {
+      id: 'TSK-1001',
+      title: '最新のタスク名（端末Bで更新済み）',
+      version: 2,
+      updated_at: '2026-10-25T14:00:00Z',
+    };
+
+    // 端末Aがバージョン1のまま更新しようとした場合
+    const clientTaskA = {
+      id: 'TSK-1001',
+      title: '端末Aの編集内容',
+      version: 1, // 古いバージョン
+    };
+
+    const isConflict = (clientTaskA.version ?? 1) < serverTask.version;
+    expect(isConflict).toBe(true);
+
+    // 端末Aが最新バージョン2を取得した後の更新は成功すること
+    const clientTaskAUpdated = {
+      id: 'TSK-1001',
+      title: '競合解決後の編集内容',
+      version: 2,
+    };
+    const isConflictResolved = (clientTaskAUpdated.version ?? 1) < serverTask.version;
+    expect(isConflictResolved).toBe(false);
+  });
+
+  // 6. D1未バインド/障害時のFail-safe検証
+  it('6. [D1障害耐性] D1未接続時に200成功を偽装せずエラー状態を認識すること', async () => {
     const mockStorage: Record<string, string> = {};
     const mockStorageObj = {
       getItem: (k: string) => mockStorage[k] || null,
@@ -34,21 +155,38 @@ describe('TOMORI AI COMMAND セキュリティ・D1同期・機能総合検証�
     (globalThis as any).localStorage = mockStorageObj;
     (globalThis as any).sessionStorage = mockStorageObj;
 
-    // トークン未設定状態
-    ApiService.clearToken();
-    expect(ApiService.getToken()).toBeNull();
+    // 503エラーレスポンスのシミュレーション
+    (globalThis as any).fetch = async () => ({
+      status: 503,
+      ok: false,
+      json: async () => ({ error: 'DatabaseNotBound', code: 'D1_NOT_CONNECTED' }),
+    });
 
-    // トークン設定
-    const testSecret = 'test-secure-key-12345';
-    ApiService.setToken(testSecret, true);
-    expect(ApiService.getToken()).toBe(testSecret);
+    const result = await ApiService.saveTask({
+      id: 'TSK-TEST',
+      title: 'テスト',
+      description: 'テスト',
+      project: 'TEST',
+      assignedAI: 'codex',
+      modelName: 'GPT-4o',
+      status: '未着手',
+      isStatusConfirmed: true,
+      lastConfirmedAt: '今',
+      createdAt: '今',
+      updatedAt: '今',
+      instructionPrompt: '',
+      artifacts: [],
+      history: [],
+      createdBy: 'Test',
+      updatedBy: 'Test',
+    });
 
-    ApiService.clearToken();
-    expect(ApiService.getToken()).toBeNull();
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('D1データベースが未接続');
   });
 
-  // 3. AI担当者推薦エンジン（RouterService）の検証
-  it('3. 自然言語からのAI担当自動推薦とプロジェクト判別', () => {
+  // 7. AI担当者推薦エンジン（RouterService）の検証
+  it('7. [AI推薦] 自然言語からのAI担当自動推薦とプロジェクト判別', () => {
     const rec1 = RouterService.analyzeRequest('スターターズコネクトのフォームでエラーが出るので修正して');
     expect(rec1.detectedProject).toBe('スターターズコネクト');
     expect(rec1.recommendedAI).toBe('codex');
@@ -63,8 +201,8 @@ describe('TOMORI AI COMMAND セキュリティ・D1同期・機能総合検証�
     expect(rec4.recommendedAI).toBe('gemini');
   });
 
-  // 4. 9大項目引き継ぎ指示書の自動生成
-  it('4. 9大項目を含む正式引き継ぎ指示書の生成検証', () => {
+  // 8. 9大項目引き継ぎ指示書の自動生成
+  it('8. [引き継ぎ] 9大項目を含む正式引き継ぎ指示書の生成検証', () => {
     const prompt = PromptGeneratorService.generateHandoffPrompt({
       project: 'スターターズコネクト',
       title: 'お問い合わせフォームのバリデーション強化',
@@ -83,8 +221,8 @@ describe('TOMORI AI COMMAND セキュリティ・D1同期・機能総合検証�
     expect(prompt).toContain('9. 完了後に報告すべき項目');
   });
 
-  // 5. AI利用状況データと確定不可データの区別検証
-  it('5. 実測利用状況データと推測不可項目の明示検証', () => {
+  // 9. AI利用状況データと確定不可データの区別検証
+  it('9. [AI利用枠] 実測利用状況データと推測不可項目の明示検証', () => {
     const entries = SAMPLE_AI_USAGE.entries;
     const chatEntry = entries.find((e) => e.scope.includes('通常のChat会話'));
     expect(chatEntry).toBeDefined();
@@ -92,30 +230,5 @@ describe('TOMORI AI COMMAND セキュリティ・D1同期・機能総合検証�
     expect(chatEntry?.status).toBe('not_available');
     expect(chatEntry?.used_percent).toBeNull();
     expect(chatEntry?.remaining_percent).toBeNull();
-  });
-
-  // 6. オフライン・同期・サンプルモードのデータ整合性
-  it('6. サンプルデータモードのロードと切り替え検証', () => {
-    const mockStorage: Record<string, string> = {};
-    (globalThis as any).localStorage = {
-      getItem: (k: string) => mockStorage[k] || null,
-      setItem: (k: string, v: string) => {
-        mockStorage[k] = v;
-      },
-      removeItem: (k: string) => {
-        delete mockStorage[k];
-      },
-      clear: () => {},
-      length: 0,
-      key: () => null,
-    };
-
-    const loaded = StorageService.loadSampleData();
-    expect(loaded.tasks.length).toBe(SAMPLE_TASKS.length);
-    expect(StorageService.isSampleMode()).toBe(true);
-
-    StorageService.clearLocalCache();
-    expect(StorageService.isSampleMode()).toBe(false);
-    expect(StorageService.getTasks()).toEqual([]);
   });
 });

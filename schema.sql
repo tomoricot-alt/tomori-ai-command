@@ -1,4 +1,4 @@
--- TOMORI AI COMMAND - Cloudflare D1 Database Schema
+-- TOMORI AI COMMAND - Cloudflare D1 Database Schema (Optimistic Concurrency Control Ready)
 
 -- 1. タスク管理テーブル
 CREATE TABLE IF NOT EXISTS tasks (
@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   last_confirmed_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
+  version INTEGER NOT NULL DEFAULT 1,
   source_url TEXT,
   instruction_prompt TEXT DEFAULT '',
   result_summary TEXT DEFAULT '',
